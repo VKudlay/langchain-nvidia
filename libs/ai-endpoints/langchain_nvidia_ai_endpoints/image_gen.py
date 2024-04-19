@@ -10,7 +10,7 @@ from langchain_core.pydantic_v1 import Field
 from langchain_core.runnables import Runnable, RunnableLambda
 from PIL import Image
 
-from langchain_nvidia_ai_endpoints._common import _NVIDIAClient
+from langchain_nvidia_ai_endpoints._common import NVIDIABase
 
 """
 ## Image Generation Models
@@ -112,7 +112,7 @@ def ImageParser() -> RunnableLambda[str, Image.Image]:
     return RunnableLambda(_get_pil_from_response)
 
 
-class ImageGenNVIDIA(_NVIDIAClient, LLM):
+class ImageGenNVIDIA(NVIDIABase, LLM):
     """NVIDIA's AI Foundation Retriever Question-Answering Asymmetric Model."""
 
     _default_model: str = "sdxl"
@@ -136,15 +136,16 @@ class ImageGenNVIDIA(_NVIDIAClient, LLM):
         **kwargs: Any,
     ) -> str:
         """Run the Image Gen Model on the given prompt and input."""
-        payload = {
+        attr_kwargs = {
             "prompt": prompt,
-            "negative_prompt": kwargs.get("negative_prompt", self.negative_prompt),
-            "sampler": kwargs.get("sampler", self.sampler),
-            "guidance_scale": kwargs.get("guidance_scale", self.guidance_scale),
-            "seed": kwargs.get("seed", self.seed),
+            "negative_prompt": self.negative_prompt,
+            "sampler": self.sampler,
+            "guidance_scale": self.guidance_scale,
+            "seed": self.seed,
         }
-        if self.get_binding_model():
-            payload["model"] = self.get_binding_model()
+        default_kwargs = self.client.default_kwargs(self.__class__.__name__)
+        attr_kwargs = {k: v for k, v in attr_kwargs.items() if v is not None}
+        payload = {**default_kwargs, **attr_kwargs, **kwargs}
         response = self.client.get_req(
             model_name=self.model, payload=payload, endpoint="infer"
         )

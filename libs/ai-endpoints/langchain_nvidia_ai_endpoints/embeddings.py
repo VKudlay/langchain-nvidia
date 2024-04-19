@@ -1,19 +1,16 @@
 """Embeddings Components Derived from NVEModel/Embeddings"""
 
-import warnings
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 from langchain_core.embeddings import Embeddings
 from langchain_core.outputs.llm_result import LLMResult
-from langchain_core.pydantic_v1 import Field, validator
+from langchain_core.pydantic_v1 import BaseModel, Field, validator
 
-from langchain_nvidia_ai_endpoints._common import _NVIDIAClient
+from langchain_nvidia_ai_endpoints._common import NVIDIABase
 from langchain_nvidia_ai_endpoints.callbacks import usage_callback_var
 
-from ._statics import MODEL_SPECS
 
-
-class NVIDIAEmbeddings(_NVIDIAClient, Embeddings):
+class NVIDIAEmbeddings(NVIDIABase, BaseModel, Embeddings):
     """NVIDIA's AI Foundation Retriever Question-Answering Asymmetric Model."""
 
     _default_model: str = "ai-embed-qa-4"
@@ -50,28 +47,16 @@ class NVIDIAEmbeddings(_NVIDIAClient, Embeddings):
         #  model: str                          -- model name, e.g. NV-Embed-QA
         #  encoding_format: "float" | "base64"
         #  input_type: "query" | "passage"
-        #  user: str                           -- ignored
-        #  truncate: "NONE" | "START" | "END"  -- default "NONE", error raised if
-        #                                         an input is too long
-        # todo: remove the playground aliases
-        model_name = self.model
-        if model_name not in MODEL_SPECS:
-            if f"playground_{model_name}" in MODEL_SPECS:
-                model_name = f"playground_{model_name}"
-        if MODEL_SPECS.get(model_name, {}).get("api_type", None) == "aifm":
-            payload = {
-                "input": texts,
-                "model": model_type,
-                "encoding_format": "float",
-            }
-        else:  # default to the API Catalog API
-            payload = {
-                "input": texts,
-                "model": self.get_binding_model() or self.model,
-                "encoding_format": "float",
-                "input_type": model_type,
-            }
-
+        #  what about truncation?
+        payload = {
+            "input": texts,
+            "encoding_format": "float",
+            **self.client.default_kwargs(self.__class__.__name__),
+        }
+        matches = [m for m in self.get_available_models() if m.id == self.model]
+        type_key = "model" if (matches and matches[0].api_type == "aifm") else "input_type"
+        payload[type_key] = model_type
+        
         response = self.client.get_req(
             model_name=self.model,
             payload=payload,

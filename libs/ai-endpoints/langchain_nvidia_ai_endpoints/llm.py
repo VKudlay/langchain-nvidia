@@ -19,7 +19,7 @@ from langchain_core.language_models import LLM
 from langchain_core.outputs import GenerationChunk
 from langchain_core.pydantic_v1 import Field
 
-from langchain_nvidia_ai_endpoints import _common as nvidia_ai_endpoints
+from langchain_nvidia_ai_endpoints._common import NVIDIABase
 
 _CallbackManager = Union[AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun]
 
@@ -65,7 +65,7 @@ for txt in starcoder.stream("Here is my implementation of fizzbuzz:\n```python\n
 """
 
 
-class NVIDIA(nvidia_ai_endpoints._NVIDIAClient, LLM):
+class NVIDIA(NVIDIABase, LLM):
     """NVIDIA chat model.
 
     Example:
@@ -201,10 +201,9 @@ class NVIDIA(nvidia_ai_endpoints._NVIDIAClient, LLM):
             "stop": self.stop,
             "labels": self.labels,
         }
-        if self.get_binding_model():
-            attr_kwargs["model"] = self.get_binding_model()
+        default_kwargs = self.client.default_kwargs(self.__class__.__name__)
         attr_kwargs = {k: v for k, v in attr_kwargs.items() if v is not None}
-        new_kwargs = {**attr_kwargs, **kwargs}
+        new_kwargs = {**default_kwargs, **attr_kwargs, **kwargs}
         return self.prep_payload(prompt=prompt, **new_kwargs)
 
     def prep_payload(self, prompt: str, **kwargs: Any) -> dict:

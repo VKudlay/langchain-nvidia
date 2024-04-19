@@ -1,15 +1,25 @@
-from typing import Optional
+from typing import Any, Dict, Optional
 
-from langchain_core.pydantic_v1 import BaseModel
+from langchain_core.pydantic_v1 import BaseModel, root_validator
 
 
 class Model(BaseModel):
     id: str
     model_type: Optional[str] = None
     api_type: Optional[str] = None
-    model_name: Optional[str] = None
+    kwargs: dict = {}
     client: Optional[str] = None
-    path: str
+    # path: str
+
+    @root_validator(pre=True)
+    def build_extra(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        all_required_field_names = {field.alias for field in cls.__fields__.values() if field.alias != 'kwargs'} 
+        kwargs: Dict[str, Any] = {}
+        for field_name in list(values):
+            if field_name not in all_required_field_names:
+                kwargs[field_name] = values.pop(field_name)
+        values['kwargs'] = kwargs
+        return values
 
 
 MODEL_SPECS = {
@@ -82,34 +92,47 @@ MODEL_SPECS = {
         "api_type": "aifm",
         "alternative": "ai-codellama-70b",
     },
-    "playground_steerlm_llama_70b": {"model_type": "chat", "api_type": "aifm"},
-    "playground_clip": {"model_type": "similarity", "api_type": "aifm"},
-    "playground_llama2_13b": {
-        "model_type": "chat",
-        "api_type": "aifm",
-        "alternative": "ai-llama2-70b",
-    },
 }
 
 MODEL_SPECS.update(
     {
-        "ai-codellama-70b": {"model_type": "chat", "model_name": "meta/codellama-70b"},
-        "ai-embed-qa-4": {"model_type": "embedding", "model_name": "NV-Embed-QA"},
+        "ai-codellama-70b": {
+            "model_type": "chat",
+            "model_name": "meta/codellama-70b",
+            "max_tokens": 1024,
+        },
+        "ai-embed-qa-4": {
+            "model_type": "embedding",
+            "model_name": "NV-Embed-QA",
+        },
         "ai-fuyu-8b": {"model_type": "image_in"},
-        "ai-gemma-7b": {"model_type": "chat", "model_name": "google/gemma-7b"},
+        "ai-gemma-7b": {
+            "model_type": "chat",
+            "model_name": "google/gemma-7b",
+            "max_tokens": 1024,
+        },
         "ai-google-deplot": {"model_type": "image_in"},
-        "ai-llama2-70b": {"model_type": "chat", "model_name": "meta/llama2-70b"},
+        "ai-llama2-70b": {
+            "model_type": "chat",
+            "model_name": "meta/llama2-70b",
+            "max_tokens": 1024,
+        },
         "ai-microsoft-kosmos-2": {"model_type": "image_in"},
         "ai-mistral-7b-instruct-v2": {
             "model_type": "chat",
             "model_name": "mistralai/mistral-7b-instruct-v0.2",
+            "max_tokens": 1024,
         },
         "ai-mixtral-8x7b-instruct": {
             "model_type": "chat",
             "model_name": "mistralai/mixtral-8x7b-instruct-v0.1",
+            "max_tokens": 1024,
         },
         "ai-neva-22b": {"model_type": "image_in"},
-        # 'ai-reranking-4b': {'model_type': 'chat'},
+        "ai-rerank-qa-mistral-4b": {
+            "model_type": "ranking",
+            "model_name": "nv-rerank-qa-mistral-4b:1",  # nvidia/rerank-qa-mistral-4b
+        },
         # 'ai-sdxl-turbo': {'model_type': 'image_out'},
         # 'ai-stable-diffusion-xl-base': {'model_type': 'iamge_out'},
         "ai-codegemma-7b": {"model_type": "chat", "model_name": "google/codegemma-7b"},
@@ -184,6 +207,7 @@ client_map = {
     "similarity": "None",
     "translation": "None",
     "tts": "None",
+    "ranking": "NVIDIARerank",
 }
 
 MODEL_SPECS = {

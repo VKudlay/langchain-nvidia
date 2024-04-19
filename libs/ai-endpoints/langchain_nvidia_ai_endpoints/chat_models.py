@@ -30,22 +30,14 @@ from langchain_core.callbacks.manager import (
     CallbackManagerForLLMRun,
 )
 from langchain_core.language_models import BaseChatModel, LanguageModelInput
-from langchain_core.messages import (
-    BaseMessage,
-    ChatMessage,
-    ChatMessageChunk,
-)
-from langchain_core.outputs import (
-    ChatGeneration,
-    ChatGenerationChunk,
-    ChatResult,
-)
+from langchain_core.messages import BaseMessage, ChatMessage, ChatMessageChunk
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.pydantic_v1 import BaseModel, Field, validator
 from langchain_core.runnables import Runnable
 from langchain_core.runnables.config import run_in_executor
 from langchain_core.tools import BaseTool
 
-from langchain_nvidia_ai_endpoints import _common as nvidia_ai_endpoints
+from langchain_nvidia_ai_endpoints._common import NVIDIABase
 from langchain_nvidia_ai_endpoints._statics import MODEL_SPECS
 
 _CallbackManager = Union[AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun]
@@ -117,7 +109,7 @@ def _url_to_b64_string(image_source: str) -> str:
         raise ValueError(f"Unable to process the provided image source: {e}")
 
 
-class ChatNVIDIA(nvidia_ai_endpoints._NVIDIAClient, BaseChatModel):
+class ChatNVIDIA(NVIDIABase, BaseChatModel):
     """NVIDIA chat model.
 
     Example:
@@ -170,7 +162,7 @@ class ChatNVIDIA(nvidia_ai_endpoints._NVIDIAClient, BaseChatModel):
     ) -> ChatResult:
         responses = self._call(messages, stop=stop, run_manager=run_manager, **kwargs)
         self._set_callback_out(responses, run_manager)
-        message = ChatMessage(**self.custom_postprocess(responses))
+        message = ChatMessage(**self._custom_postprocess(responses))
         generation = ChatGeneration(message=message)
         return ChatResult(generations=[generation], llm_output=responses)
 
@@ -198,8 +190,8 @@ class ChatNVIDIA(nvidia_ai_endpoints._NVIDIAClient, BaseChatModel):
         **kwargs: Any,
     ) -> dict:
         """Invoke on a single list of chat messages."""
-        inputs = self.custom_preprocess(messages)
-        responses = self.get_generation(inputs=inputs, stop=stop, **kwargs)
+        inputs = self._custom_preprocess(messages)
+        responses = self._get_generation(inputs=inputs, stop=stop, **kwargs)
         return responses
 
     def _get_filled_chunk(self, **kwargs: Any) -> ChatGenerationChunk:
@@ -214,10 +206,10 @@ class ChatNVIDIA(nvidia_ai_endpoints._NVIDIAClient, BaseChatModel):
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
         """Allows streaming to model!"""
-        inputs = self.custom_preprocess(messages)
-        for response in self.get_stream(inputs=inputs, stop=stop, **kwargs):
+        inputs = self._custom_preprocess(messages)
+        for response in self._get_stream(inputs=inputs, stop=stop, **kwargs):
             self._set_callback_out(response, run_manager)
-            chunk = self._get_filled_chunk(**self.custom_postprocess(response))
+            chunk = self._get_filled_chunk(**self._custom_postprocess(response))
             if run_manager:
                 run_manager.on_llm_new_token(chunk.text, chunk=chunk)
             yield chunk
@@ -229,10 +221,10 @@ class ChatNVIDIA(nvidia_ai_endpoints._NVIDIAClient, BaseChatModel):
         run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
-        inputs = self.custom_preprocess(messages)
-        async for response in self.get_astream(inputs=inputs, stop=stop, **kwargs):
+        inputs = self._custom_preprocess(messages)
+        async for response in self._get_astream(inputs=inputs, stop=stop, **kwargs):
             self._set_callback_out(response, run_manager)
-            chunk = self._get_filled_chunk(**self.custom_postprocess(response))
+            chunk = self._get_filled_chunk(**self._custom_postprocess(response))
             if run_manager:
                 await run_manager.on_llm_new_token(chunk.text, chunk=chunk)
             yield chunk
@@ -248,10 +240,10 @@ class ChatNVIDIA(nvidia_ai_endpoints._NVIDIAClient, BaseChatModel):
                 if hasattr(cb, "llm_output"):
                     cb.llm_output = result
 
-    def custom_preprocess(
+    def _custom_preprocess(
         self, msg_list: Sequence[BaseMessage]
     ) -> List[Dict[str, str]]:
-        return [self.preprocess_msg(m) for m in msg_list]
+        return [self._preprocess_msg(m) for m in msg_list]
 
     def _process_content(self, content: Union[str, List[Union[dict, str]]]) -> str:
         if isinstance(content, str):
@@ -284,7 +276,7 @@ class ChatNVIDIA(nvidia_ai_endpoints._NVIDIAClient, BaseChatModel):
                     raise ValueError(f"Unrecognized message part format: {part}")
         return "".join(string_array)
 
-    def preprocess_msg(self, msg: BaseMessage) -> Dict[str, str]:
+    def _preprocess_msg(self, msg: BaseMessage) -> Dict[str, str]:
         if isinstance(msg, BaseMessage):
             role_convert = {"ai": "assistant", "human": "user"}
             if isinstance(msg, ChatMessage):
@@ -296,7 +288,7 @@ class ChatNVIDIA(nvidia_ai_endpoints._NVIDIAClient, BaseChatModel):
             return {"role": role, "content": content}
         raise ValueError(f"Invalid message: {repr(msg)} of type {type(msg)}")
 
-    def custom_postprocess(self, msg: dict) -> dict:
+    def _custom_postprocess(self, msg: dict) -> dict:
         kw_left = msg.copy()
         out_dict = {
             "role": kw_left.pop("role", "assistant") or "assistant",
@@ -315,38 +307,44 @@ class ChatNVIDIA(nvidia_ai_endpoints._NVIDIAClient, BaseChatModel):
     ######################################################################################
     ## Core client-side interfaces
 
-    def get_generation(
+    def _get_generation(
         self,
         inputs: Sequence[Dict],
         **kwargs: Any,
     ) -> dict:
         """Call to client generate method with call scope"""
         stop = kwargs["stop"] = kwargs.get("stop") or self.stop
-        payload = self.get_payload(inputs=inputs, stream=False, **kwargs)
-        out = self.client.get_req_generation(self.model, stop=stop, payload=payload)
+        payload = self._get_payload(inputs=inputs, stream=False, **kwargs)
+        out = self.client.get_req_generation(
+            self.model, stop=stop, payload=payload
+        )
         return out
 
-    def get_stream(
+    def _get_stream(
         self,
         inputs: Sequence[Dict],
         **kwargs: Any,
     ) -> Iterator:
         """Call to client stream method with call scope"""
         stop = kwargs["stop"] = kwargs.get("stop") or self.stop
-        payload = self.get_payload(inputs=inputs, stream=True, **kwargs)
-        return self.client.get_req_stream(self.model, stop=stop, payload=payload)
+        payload = self._get_payload(inputs=inputs, stream=True, **kwargs)
+        return self.client.get_req_stream(
+            self.model, stop=stop, payload=payload
+        )
 
-    def get_astream(
+    def _get_astream(
         self,
         inputs: Sequence[Dict],
         **kwargs: Any,
     ) -> AsyncIterator:
         """Call to client astream methods with call scope"""
         stop = kwargs["stop"] = kwargs.get("stop") or self.stop
-        payload = self.get_payload(inputs=inputs, stream=True, **kwargs)
-        return self.client.get_req_astream(self.model, stop=stop, payload=payload)
+        payload = self._get_payload(inputs=inputs, stream=True, **kwargs)
+        return self.client.get_req_astream(
+            self.model, stop=stop, payload=payload
+        )
 
-    def get_payload(self, inputs: Sequence[Dict], **kwargs: Any) -> dict:
+    def _get_payload(self, inputs: Sequence[Dict], **kwargs: Any) -> dict:
         """Generates payload for the _NVIDIAClient API to send to service."""
         attr_kwargs = {
             "temperature": self.temperature,
@@ -357,15 +355,14 @@ class ChatNVIDIA(nvidia_ai_endpoints._NVIDIAClient, BaseChatModel):
             "stop": self.stop,
             "labels": self.labels,
         }
-        if model_name := self.get_binding_model():
-            attr_kwargs["model"] = model_name
+        default_kwargs = self.client.default_kwargs(self.__class__.__name__)
         attr_kwargs = {k: v for k, v in attr_kwargs.items() if v is not None}
-        new_kwargs = {**attr_kwargs, **kwargs}
-        return self.prep_payload(inputs=inputs, **new_kwargs)
+        new_kwargs = {**default_kwargs, **attr_kwargs, **kwargs}
+        return self._prep_payload(inputs=inputs, **new_kwargs)
 
-    def prep_payload(self, inputs: Sequence[Dict], **kwargs: Any) -> dict:
+    def _prep_payload(self, inputs: Sequence[Dict], **kwargs: Any) -> dict:
         """Prepares a message or list of messages for the payload"""
-        messages = [self.prep_msg(m) for m in inputs]
+        messages = [self._prep_msg(m) for m in inputs]
         if kwargs.get("labels"):
             # (WFH) Labels are currently (?) always passed as an assistant
             # suffix message, but this API seems less stable.
@@ -374,7 +371,7 @@ class ChatNVIDIA(nvidia_ai_endpoints._NVIDIAClient, BaseChatModel):
             kwargs.pop("stop")
         return {"messages": messages, **kwargs}
 
-    def prep_msg(self, msg: Union[str, dict, BaseMessage]) -> dict:
+    def _prep_msg(self, msg: Union[str, dict, BaseMessage]) -> dict:
         """Helper Method: Ensures a message is a dictionary with a role and content."""
         if isinstance(msg, str):
             # (WFH) this shouldn't ever be reached but leaving this here bcs

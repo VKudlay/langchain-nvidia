@@ -33,6 +33,7 @@ from langchain_core.pydantic_v1 import (
 from requests.models import Response
 
 from langchain_nvidia_ai_endpoints._statics import MODEL_SPECS, Model
+from langchain_nvidia_ai_endpoints.modesets import MODESET
 
 logger = logging.getLogger(__name__)
 
@@ -56,19 +57,11 @@ class NVEModel(BaseModel):
 
     ## Core defaults. These probably should not be changed
     _api_key_var = "NVIDIA_API_KEY"
-    base_url: str = Field(
-        "https://api.nvcf.nvidia.com/v2/nvcf",
-        description="Base URL for standard inference",
-    )
+    _base_url_var = "NVIDIA_BASE_URL"
+    base_url: Optional[str] = Field(description="Base URL for standard inference")
     get_session_fn: Callable = Field(requests.Session)
     get_asession_fn: Callable = Field(aiohttp.ClientSession)
-    endpoints: dict = Field(
-        {
-            "infer": "{base_url}/pexec/functions/{model_id}",
-            "status": "{base_url}/pexec/status/{request_id}",
-            "models": "{base_url}/functions",
-        }
-    )
+    endpoints: Optional[dict] = Field({})
 
     api_key: SecretStr = Field(..., description="API Key for service of choice")
     is_staging: bool = Field(False, description="Whether to use staging API")
@@ -117,6 +110,14 @@ class NVEModel(BaseModel):
             or os.getenv(cls._api_key_var)
             or ""
         )
+        values["base_url"] = (
+            values.get(cls._base_url_var.lower())
+            or values.get("base_url")
+            or os.getenv(cls._base_url_var)
+            or ""
+        )
+        if not values.get("base_url"):
+            values.pop("base_url")
         values["is_staging"] = "nvapi-stg-" in values["api_key"]
         if "headers_tmpl" not in values:
             call_kvs = {
@@ -151,9 +152,9 @@ class NVEModel(BaseModel):
         live_fns = self.available_functions
         if "status" in live_fns[0]:
             live_fns = [v for v in live_fns if v.get("status") == "ACTIVE"]
-            self._available_models = {v["name"]: v["id"] for v in live_fns}
+            self._available_models = {v.pop("name"): v for v in live_fns}
         else:
-            self._available_models = {v.get("id"): v.get("owned_by") for v in live_fns}
+            self._available_models = {v.pop("id"): v for v in live_fns}
         return self._available_models
 
     @property
@@ -258,11 +259,13 @@ class NVEModel(BaseModel):
         except requests.HTTPError:
             try:
                 rd = response.json()
-                if "detail" in rd and "reqId" in rd.get("detail", ""):
-                    rd_buf = "- " + str(rd["detail"])
-                    rd_buf = rd_buf.replace(": ", ", Error: ").replace(", ", "\n- ")
-                    rd["detail"] = rd_buf
-            except json.JSONDecodeError:
+                if "detail" in rd:
+                    assert rd["detail"]
+                    if "reqId" in rd.get("detail", ""):
+                        rd_buf = "- " + str(rd["detail"])
+                        rd_buf = rd_buf.replace(": ", ", Error: ").replace(", ", "\n- ")
+                        rd["detail"] = rd_buf
+            except (json.JSONDecodeError, AssertionError):
                 rd = response.__dict__
                 if "status_code" in rd:
                     if "headers" in rd and "WWW-Authenticate" in rd["headers"]:
@@ -277,12 +280,7 @@ class NVEModel(BaseModel):
                     except Exception:
                         rd = {"detail": rd}
             status = rd.get("status") or rd.get("status_code") or "###"
-            title = (
-                rd.get("title")
-                or rd.get("error")
-                or rd.get("reason")
-                or "Unknown Error"
-            )
+            title = rd.get("title") or rd.get("error") or rd.get("reason") or "Unknown Error"
             header = f"[{status}] {title}"
             body = ""
             if "requestId" in rd:
@@ -522,31 +520,32 @@ class NVEModel(BaseModel):
                             break
 
 
-class _NVIDIAClient(BaseModel):
+class _NVIDIAClient(NVEModel):
     """
     Higher-Level AI Foundation Model Function API Client with argument defaults.
     Is subclassed by ChatNVIDIA to provide a simple LangChain interface.
     """
 
-    client: NVEModel = Field(NVEModel)
-
-    _default_model: str = ""
-    model: Optional[str] = Field(description="Name of the model to invoke")
-    infer_endpoint: str = Field("{base_url}/chat/completions")
+    model: str = Field(description="Name of the model to invoke")
     curr_mode: _MODE_TYPE = Field("nvidia")
+    _mode_var = "NVIDIA_DEFAULT_MODE"
 
-    ####################################################################################
+    ####################################################################################        
 
     @root_validator(pre=True)
     def validate_client(cls, values: Any) -> Any:
         """Validate and update client arguments, including API key and formatting"""
-        if not values.get("client"):
-            values["client"] = NVEModel(**values)
-        elif isinstance(values["client"], NVEModel):
-            values["client"] = values["client"].__class__(**values["client"].dict())
         if not values.get("model"):
             values["model"] = cls._default_model
             assert values["model"], "No model given, with no default to fall back on."
+
+        values["curr_mode"] = (
+            values.get(cls._mode_var.lower())
+            or values.get("default_mode")
+            or os.getenv(cls._mode_var)
+        )
+        if not values.get("curr_mode"):
+            values.pop("curr_mode")
 
         # the only model that doesn't support a stream parameter is kosmos_2.
         # to address this, we'll use the payload_fn to remove the stream parameter for
@@ -559,8 +558,36 @@ class _NVIDIAClient(BaseModel):
                 payload.pop("stream", None)
                 return payload
 
-            values["client"].payload_fn = kosmos_patch
+            values["payload_fn"] = kosmos_patch
 
+        return values
+
+    @root_validator(pre=False)
+    def validate_client_final(cls, values: Any) -> Any:
+        return cls.set_mode(values, values.get("curr_mode"))
+
+    @staticmethod
+    def set_mode(values, mode):
+        mode_spec = MODESET.get(mode)
+        if not mode_spec:
+            raise ValueError(f"Unknown mode: `{mode}`. Expected one of {list(mode_spec.keys())}.")
+        values["curr_mode"] = mode
+        if "api_key" in mode_spec:
+            key_var = mode_spec.get("api_key")
+            key_start = mode_spec.get("api_start", "")
+            curr_api = values.get("api_key", "")
+            if not curr_api.startswith(key_start):
+                values["api_key"] = os.getenv(key_var)
+            if not values.get("api_key"):
+                raise ValueError(f"No {key_var} in env/fed as api_key. ({key_start}-...)")
+        values["base_url"] = (
+            values.get("base_url")
+            or mode_spec.get("base_url")
+            or os.getenv("_base_url_var")
+        )
+        assert "base_url", f"Base URL must be specified for mode \"{mode}\""
+        endpoint_override = {k: v for k, v in values.items() if k in ("infer", "status", "models")} 
+        values["endpoints"] = {**mode_spec.get("endpoints"), **values.get("endpoints"), **endpoint_override}
         return values
 
     @classmethod
@@ -569,88 +596,62 @@ class _NVIDIAClient(BaseModel):
 
     @property
     def lc_secrets(self) -> Dict[str, str]:
-        return {"api_key": self.client._api_key_var}
+        return {"api_key": self._api_key_var}
 
     @property
     def lc_attributes(self) -> Dict[str, Any]:
         attributes: Dict[str, Any] = {}
-        if getattr(self.client, "base_url"):
-            attributes["base_url"] = self.client.base_url
+        if getattr(self, "base_url"):
+            attributes["base_url"] = self.base_url
 
         if self.model:
             attributes["model"] = self.model
 
-        if getattr(self.client, "endpoints"):
-            attributes["endpoints"] = self.client.endpoints
+        if getattr(self, "endpoints"):
+            attributes["endpoints"] = self.endpoints
 
         return attributes
 
-    @property
-    def available_functions(self) -> List[dict]:
-        """Map the available functions that can be invoked."""
-        return self.__class__.get_available_functions(client=self)
-
-    @property
-    def available_models(self) -> List[Model]:
-        """Map the available models that can be invoked."""
-        return self.__class__.get_available_models(client=self)
-
-    @classmethod
-    def get_available_functions(
-        cls,
-        mode: Optional[_MODE_TYPE] = None,
-        client: Optional[_NVIDIAClient] = None,
-        **kwargs: Any,
-    ) -> List[dict]:
-        """Map the available functions that can be invoked. Callable from class"""
-        nveclient = (client or cls(**kwargs)).mode(mode, **kwargs).client
-        nveclient.reset_method_cache()
-        return nveclient.available_functions
-
-    @classmethod
     def get_available_models(
-        cls,
+        self,
         mode: Optional[_MODE_TYPE] = None,
-        client: Optional[_NVIDIAClient] = None,
         list_all: bool = False,
+        show_clientless: bool = False,
+        filter: Optional[str] = None,
         **kwargs: Any,
     ) -> List[Model]:
         """Map the available models that can be invoked. Callable from class"""
-        nveclient = (client or cls(**kwargs)).mode(mode, **kwargs).client
-        nveclient.reset_method_cache()
+        nveclient = self if not mode else self.mode(mode, **kwargs)
         out = sorted(
             [
-                Model(id=k.replace("playground_", ""), path=v, **MODEL_SPECS.get(k, {}))
+                Model(id=k.replace("playground_", ""), **{**MODEL_SPECS.get(k, {}), **v})
                 for k, v in nveclient.available_models.items()
             ],
-            key=lambda x: f"{x.client or 'Z'}{x.id}{cls}",
+            key=lambda x: f"{x.client or 'Z'}{x.id}{filter}",
         )
+        filter = filter or getattr(self, '__name__', self.__class__.__name__)
         if not list_all:
-            out = [m for m in out if m.client == cls.__name__ or m.model_type is None]
+            out = [m for m in out if m.client == filter or (show_clientless and not m.client)]
         return out
 
     def get_model_details(self, model: Optional[str] = None) -> dict:
         """Get more meta-details about a model retrieved by a given name"""
         if model is None:
             model = self.model
-        model_key = self.client._get_invoke_url(model).split("/")[-1]
-        known_fns = self.client.available_functions
+        model_key = self._get_invoke_url(model).split("/")[-1]
+        known_fns = self.available_functions
         fn_spec = [f for f in known_fns if f.get("id") == model_key][0]
         return fn_spec
 
-    def get_binding_model(self) -> Optional[str]:
-        """Get the model to bind to the client as default payload argument"""
-        # if a model is configured with a model_name, always use that
-        # todo: move from search of available_models to a Model property
-        matches = [model for model in self.available_models if model.id == self.model]
-        if matches:
-            if matches[0].model_name:
-                return matches[0].model_name
-        if self.curr_mode == "catalog":
-            return f"playground_{self.model}"
-        if self.curr_mode == "nvidia":
-            return ""
-        return self.model
+    def default_kwargs(self, type: str) -> dict:
+        models = self.get_available_models(filter=type, show_clientless=True)
+        matches = [model for model in models if model.id == self.model]
+        if matches and not self.curr_mode in ("openai",):
+            out = matches[0].kwargs
+            if "model_name" in out:
+                out["model"] = out.pop("model_name")
+            return out
+        return {'model': self.model}
 
     def mode(
         self,
@@ -674,69 +675,110 @@ class _NVIDIAClient(BaseModel):
 
         out.model = model or out.model
 
-        if base_url and not force_mode:
-            ## If a user tries to set base_url, assume custom openapi unless forced
-            mode = "open"
+        out.__dict__ = {**out.__dict__, **self.set_mode(out.__dict__)}
+        if infer_path: 
+            out.endpoints["infer"] = infer_path
 
-        if mode in ["nvidia", "catalog"]:
-            key_var = "NVIDIA_API_KEY"
-            if not api_key or not api_key.startswith("nvapi-"):
-                api_key = os.getenv(key_var) or out.client.api_key.get_secret_value()
-            if not api_key.startswith("nvapi-"):
-                raise ValueError(f"No {key_var} in env/fed as api_key. (nvapi-...)")
-
-        if mode in ["openai"]:
-            key_var = "OPENAI_API_KEY"
-            if not api_key or not api_key.startswith("sk-"):
-                api_key = os.getenv(key_var) or out.client.api_key.get_secret_value()
-            if not api_key.startswith("sk-"):
-                raise ValueError(f"No {key_var} in env/fed as api_key. (sk-...)")
-
-        out.curr_mode = mode
-        if api_key:
-            out.client.api_key = SecretStr(api_key)
-
-        catalog_base = "https://integrate.api.nvidia.com/v1"
-        openai_base = "https://api.openai.com/v1"  ## OpenAI Main URL
-        nvcf_base = "https://api.nvcf.nvidia.com/v2/nvcf"  ## NVCF Main URL
-        nvcf_infer = "{base_url}/pexec/functions/{model_id}"  ## Inference endpoints
-        nvcf_status = "{base_url}/pexec/status/{request_id}"  ## 202 wait handle
-        nvcf_models = "{base_url}/functions"  ## Model listing
-
-        if mode == "nvidia":
-            ## Classic support for nvcf-backed foundation model endpoints.
-            out.client.base_url = base_url or nvcf_base
-            out.client.endpoints = {
-                "infer": nvcf_infer,  ## Per-model inference
-                "status": nvcf_status,  ## 202 wait handle
-                "models": nvcf_models,  ## Model listing
-            }
-
-        elif mode == "catalog":
-            ## NVIDIA API Catalog Integration: OpenAPI-spec gateway over NVCF endpoints
-            out.client.base_url = base_url or catalog_base
-            out.client.endpoints["infer"] = infer_path or out.infer_endpoint
-            ## API Catalog is early, so no models list yet. Undercut to nvcf for now.
-            out.client.endpoints["models"] = nvcf_models.format(base_url=nvcf_base)
-
-        elif mode == "open" or mode == "nim":
-            ## OpenAPI-style specs to connect to NeMo Inference Microservices etc.
-            ## Most generic option, requires specifying base_url
-            assert base_url, "Base URL must be specified for open/nim mode"
-            out.client.base_url = base_url
-            out.client.endpoints["infer"] = infer_path or out.infer_endpoint
-            out.client.endpoints["models"] = models_path or "{base_url}/models"
-
-        elif mode == "openai":
-            ## OpenAI-style specification to connect to OpenAI endpoints
-            out.client.base_url = base_url or openai_base
-            out.client.endpoints["infer"] = infer_path or out.infer_endpoint
-            out.client.endpoints["models"] = models_path or "{base_url}/models"
-
-        else:
-            options = ["catalog", "nvidia", "nim", "open", "openai"]
-            raise ValueError(f"Unknown mode: `{mode}`. Expected one of {options}.")
-
-        out.client.reset_method_cache()
+        out.reset_method_cache()
 
         return out
+
+
+class NVIDIABase(BaseModel):
+
+    _default_model: str = ""
+    client: _NVIDIAClient = Field(None)
+    infer_endpoint: str = Field("{base_url}/chat/completions")
+    model: str = Field(description="Name of the model to invoke")
+
+    def __init__(self, *args: List, **kwargs: Any):
+        if len(args) == 1:
+            kwargs["model"] = args[0]
+            super().__init__(**kwargs)
+        else: 
+            super().__init__(*args, **kwargs)
+        self.client = _NVIDIAClient(model=self.model)
+        self.client.endpoints["infer"] = self.infer_endpoint
+
+    @property
+    def available_models(self) -> List[Model]:
+        """
+        Get a list of available models that work with ChatNVIDIA.
+        """
+        return self.client.get_available_models(
+            filter=self.__class__.__name__, list_all=True
+        )
+
+    @classmethod
+    def get_available_models(
+        cls,
+        mode: Optional[_MODE_TYPE] = None,
+        list_all: bool = False,
+        **kwargs: Any,
+    ) -> List[Model]:
+        """
+        Get a list of available models. These models will work with the ChatNVIDIA
+        interface.
+
+        Use the mode parameter to specify the mode to use. See the docs for mode()
+        to understand additional keyword arguments required when setting mode.
+
+        It is possible to get a list of all models, including those that are not
+        chat models, by setting the list_all parameter to True.
+        """
+        self = cls(**kwargs).mode(mode=mode, **kwargs)
+        return self.client.get_available_models(
+            filter=self.__class__.__name__, mode=mode, list_all=list_all, **kwargs
+        )
+
+    def mode(
+        self,
+        mode: Optional[_MODE_TYPE] = "nvidia",
+        base_url: Optional[str] = None,
+        model: Optional[str] = None,
+        api_key: Optional[str] = None,
+        **kwargs: Any,
+    ) -> NVIDIABase:
+        """
+        Change the mode.
+
+        There are two modes, "nvidia" and "nim". The "nvidia" mode is the default mode
+        and is used to interact with hosted NVIDIA AI endpoints. The "nim" mode is
+        used to interact with NVIDIA NIM endpoints, which are typically hosted
+        on-premises.
+
+        For the "nvidia" mode, the "api_key" parameter is available to specify your
+        API key. If not specified, the NVIDIA_API_KEY environment variable will be used.
+
+        For the "nim" mode, the "base_url" and "model" parameters are required. Set
+        base_url to the url of your NVIDIA NIM endpoint. For instance,
+        "https://localhost:9999/v1". Additionally, the "model" parameter must be set
+        to the name of the model inside the NIM.
+        """
+        new_kwargs = {
+            'infer_path': self.infer_endpoint,
+            'model': model or self.model,
+            **kwargs
+        }
+        self.client = self.client.mode(
+            mode=mode,
+            base_url=base_url,
+            api_key=api_key,
+            **new_kwargs,
+        )
+        self.model = self.client.model
+        return self
+
+    ######################################################################################
+    ## Serialization support
+
+    @classmethod
+    def is_lc_serializable(cls) -> bool:
+        return True
+
+    @property
+    def lc_secrets(self) -> Dict[str, str]:
+        return {
+            "api_key": NVEModel._api_key_var,
+            "nvidia_api_key": NVEModel._api_key_var
+        }
