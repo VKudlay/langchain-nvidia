@@ -60,6 +60,7 @@ class NVEModel(BaseModel):
 
     ## Core defaults. These probably should not be changed
     _api_key_var = "NVIDIA_API_KEY"
+    _base_url_var = "NVIDIA_BASE_URL"
     base_url: str = Field(
         "https://api.nvcf.nvidia.com/v2/nvcf",
         description="Base URL for standard inference",
@@ -123,6 +124,14 @@ class NVEModel(BaseModel):
             or os.getenv(cls._api_key_var)
             or ""
         )
+        values["base_url"] = (
+            values.get(cls._base_url_var.lower())
+            or values.get("base_url")
+            or os.getenv(cls._base_url_var)
+            or ""
+        )
+        if not values.get("base_url"):
+            values.pop("base_url")
         values["is_staging"] = "nvapi-stg-" in values["api_key"]
         if "headers_tmpl" not in values:
             call_kvs = {
