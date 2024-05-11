@@ -26,7 +26,6 @@ class NVIDIAEmbeddings(BaseNVIDIA, Embeddings):
 
     _default_model: str = "nvidia/embed-qa-4"
     _default_max_batch_size: int = 50
-    infer_endpoint: str = Field("{base_url}/embeddings")
     model: str = Field(_default_model, description="Name of the model to invoke")
     truncate: Literal["NONE", "START", "END"] = Field(
         default="NONE",
@@ -97,7 +96,7 @@ class NVIDIAEmbeddings(BaseNVIDIA, Embeddings):
             payload["input_type"] = model_type
         result = self.client.get_req_generation(self.model, payload=payload)
         data = result.get("data", result)
-        if not isinstance("data", list):
+        if not isinstance(data, list):
             raise ValueError(f"Expected data with a list of embeddings. Got: {data}")
         embedding_list = [(res.get("embedding"), res.get("index")) for res in data]
         self._invoke_callback_vars(result)

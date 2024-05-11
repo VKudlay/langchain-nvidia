@@ -235,12 +235,18 @@ class UsageCallbackHandler(BaseCallbackHandler):
             return None
 
         # compute tokens and cost for this request
-        token_usage = response.llm_output.get(
-            "token_usage", response.llm_output.get("usage", {})
+        token_usage = (
+            response.llm_output.get("token_usage")
+            or response.llm_output.get("usage")
+            or {}
+        )
+        model_name = (
+            response.llm_output.get("model")
+            or response.llm_output.get("model_name")
+            or ""
         )
         completion_tokens = token_usage.get("completion_tokens", 0)
         prompt_tokens = token_usage.get("prompt_tokens", 0)
-        model_name = response.llm_output.get("model_name", "")
         if model_name in self.price_map:
             completion_cost = get_token_cost_for_model(
                 model_name, completion_tokens, self.price_map, is_completion=True

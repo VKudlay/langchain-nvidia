@@ -6,6 +6,7 @@ import logging
 import os
 import time
 from copy import deepcopy
+from collections import defaultdict
 from functools import partial
 from typing import (
     Any,
@@ -43,6 +44,48 @@ _MODE_TYPE = Literal["catalog", "nvidia", "nim", "open", "openai", "nvcf"]
 
 def default_payload_fn(payload: dict) -> dict:
     return payload
+
+
+def make_safe(d, sensitive_keys=["Authorization"]):
+    safe = deepcopy(dict(d))
+    stack = [safe]
+    while stack:
+        entry = stack.pop()
+        if isinstance(entry, dict):
+            for key in sensitive_keys:
+                if key in entry: 
+                    entry[key] = SecretStr(key)
+            stack += [v for v in entry.values() if isinstance(v, (dict, list, tuple))]
+        elif isinstance(entry, (list, tuple)):
+            stack += [v for v in entry if isinstance(v, (dict, list, tuple))]
+    return safe
+
+
+class ClientTape():
+
+    TapePool: Dict[int, Any] = {}
+
+    def __init__(self):
+        self.trace = defaultdict(lambda: [])
+        self.idx = len(self.__class__.TapePool)
+
+    def __enter__(self):
+        self.__class__.TapePool[self.idx] = self
+        return self
+
+    def __exit__(self, *args: List, **kwargs: Any):
+        del self.__class__.TapePool[self.idx]
+
+    def clear(self):
+        self.trace.clear()
+
+    @classmethod
+    def record(cls, key, value, idx=None, safe=False):
+        output = value if not safe else make_safe(value)
+        tapes = cls.TapePool.values() if idx is None else cls.TapePool.get(idx)
+        for tape in tapes:
+            tape.trace[key] += [output]
+        return output
 
 
 class BaseClient(BaseModel, ABC):
@@ -100,7 +143,7 @@ class BaseClient(BaseModel, ABC):
     @property
     def headers(self) -> dict:
         """Return headers with API key injected"""
-        headers_ = self.headers_tmpl.copy()
+        headers_ = deepcopy(self.headers_tmpl)
         for header in headers_.values():
             if "{api_key}" in header["Authorization"]:
                 header["Authorization"] = header["Authorization"].format(
@@ -178,14 +221,16 @@ class BaseClient(BaseModel, ABC):
         payload: Optional[dict] = {},
     ) -> Tuple[Response, Any]:
         """Method for posting to the AI Foundation Model Function API."""
-        self.last_inputs = {
+        last_inputs = {
             "url": invoke_url,
             "headers": self.headers["call"],
             "json": self.payload_fn(payload),
             "stream": False,
         }
+        self.last_inputs = ClientTape.record("request", last_inputs, safe=True)
         session = self.get_session_fn()
-        self.last_response = response = session.post(**self.last_inputs)
+        response = session.post(**last_inputs)
+        self.last_response = ClientTape.record("response", response)
         self._try_raise(response)
         return response, session
 
@@ -195,15 +240,17 @@ class BaseClient(BaseModel, ABC):
         payload: Optional[dict] = {},
     ) -> Tuple[Response, Any]:
         """Method for getting from the AI Foundation Model Function API."""
-        self.last_inputs = {
+        last_inputs = {
             "url": invoke_url,
             "headers": self.headers["call"],
             "stream": False,
         }
         if payload:
-            self.last_inputs["json"] = self.payload_fn(payload)
+            last_inputs["json"] = self.payload_fn(payload)
+        self.last_inputs = ClientTape.record("request", last_inputs, safe=True)
         session = self.get_session_fn()
-        self.last_response = response = session.get(**self.last_inputs)
+        response = session.get(**last_inputs)
+        self.last_response = ClientTape.record("response", response)
         self._try_raise(response)
         return response, session
 
@@ -268,7 +315,8 @@ class BaseClient(BaseModel, ABC):
                 body += "RequestID: " + rd["requestId"]
             else:
                 body = str(
-                    rd.get("error", {}).get("message") 
+                    rd.get("error", {}).get("message")
+                    or rd.get("reason")
                     or rd.get("detail") 
                     or rd
                 )
@@ -359,7 +407,6 @@ class BaseClient(BaseModel, ABC):
         model_name: Optional[str] = None,
         payload: dict = {},
         invoke_url: Optional[str] = None,
-        stop: Optional[Sequence[str]] = None,
         endpoint: str = "",
     ) -> Response:
         """Post to the API."""
@@ -374,68 +421,53 @@ class BaseClient(BaseModel, ABC):
         model_name: Optional[str] = None,
         payload: dict = {},
         invoke_url: Optional[str] = None,
-        stop: Optional[Sequence[str]] = None,
         endpoint: str = "infer",
     ) -> dict:
         """Method for an end-to-end post query with NVE post-processing."""
         invoke_url = self._get_invoke_url(model_name, invoke_url, endpoint=endpoint)
         response = self.get_req(model_name, payload, invoke_url)
-        output, _ = self.postprocess(response, stop=stop)
+        output = self.postprocess(response)
         return output
 
     def postprocess(
-        self, response: Union[str, Response], stop: Optional[Sequence[str]] = None
+        self, response: Union[str, Response]
     ) -> Tuple[dict, bool]:
         """Parses a response from the AI Foundation Model Function API.
-        Strongly assumes that the API will return a single response.
         """
         msg_list = self._process_response(response)
-        msg, is_stopped = self._aggregate_msgs(msg_list)
-        msg, is_stopped = self._early_stop_msg(msg, is_stopped, stop=stop)
-        return msg, is_stopped
+        responses = self._aggregate_msgs(msg_list)
+        return responses
 
     def _aggregate_msgs(self, msg_list: Sequence[dict]) -> Tuple[dict, bool]:
         """Dig out relevant details of aggregated message"""
-        content_buffer: Dict[str, Any] = dict()
-        content_holder: Dict[Any, Any] = dict()
+        content_buffer: List[Dict[str, Any]] = []
+        content_holder: List[Dict[Any, Any]] = []
+        stopped_holder: List[bool] = []
         usage_holder: Dict[Any, Any] = dict()  ####
-        is_stopped = False
-        for msg in msg_list:        
-            usage_holder = msg.get("usage", {})  ####
-            if "choices" in msg:
+        for response in msg_list:
+            # usage_holder = response.get("usage", {})  ####
+            if "choices" in response:
                 ## Tease out ['choices'][0]...['delta'/'message']
-                msg = msg.get("choices", [{}])[0]
-                is_stopped = msg.get("finish_reason", "") == "stop"
-                msg = msg.get("delta", msg.get("message", msg.get("text", "")))
-                if not isinstance(msg, dict):
-                    msg = {"content": msg}
-            elif "data" in msg:
-                ## Tease out ['data'][0]...['embedding']
-                msg = msg.get("data", [{}])[0]
-            content_holder = msg
-            for k, v in msg.items():
-                if k in ("content",) and k in content_buffer:
-                    content_buffer[k] += v
-                else:
-                    content_buffer[k] = v
-            if is_stopped:
-                break
-        content_holder = {**content_holder, **content_buffer}
-        if usage_holder:
-            content_holder.update(token_usage=usage_holder)  ####
-        return content_holder, is_stopped
-
-    def _early_stop_msg(
-        self, msg: dict, is_stopped: bool, stop: Optional[Sequence[str]] = None
-    ) -> Tuple[dict, bool]:
-        """Try to early-terminate streaming or generation by iterating over stop list"""
-        content = msg.get("content", "")
-        if content and stop:
-            for stop_str in stop:
-                if stop_str and stop_str in content:
-                    msg["content"] = content[: content.find(stop_str) + 1]
-                    is_stopped = True
-        return msg, is_stopped
+                choices = response.get("choices", [{}])
+                for i, msg in enumerate(choices):
+                    stopped_holder += [msg.get("finish_reason", "") == "stop"]
+                    msg = msg.get("delta", msg.get("message", msg.get("text", "")))
+                    if not isinstance(msg, dict):
+                        msg = {"content": msg}
+                    content_holder += [msg]
+                for i, msg in enumerate(content_holder):
+                    content_buffer += [{}]
+                    for k, v in msg.items():
+                        if k in ("content",) and k in content_buffer:
+                            content_buffer[-1][k] += v
+                        else:
+                            content_buffer[-1][k] = v
+                        if stopped_holder[i]:
+                            break
+        content_holder = [{**h, **b} for h, b in zip(content_holder, content_buffer)]
+        if content_holder:
+            response['cumulative'] = content_holder
+        return response
 
     ####################################################################################
     ## Streaming interface to allow you to iterate through progressive generations
@@ -445,19 +477,21 @@ class BaseClient(BaseModel, ABC):
         model: Optional[str] = None,
         payload: dict = {},
         invoke_url: Optional[str] = None,
-        stop: Optional[Sequence[str]] = None,
         endpoint: str = "infer",
     ) -> Iterator:
         invoke_url = self._get_invoke_url(model, invoke_url, endpoint=endpoint)
         if payload.get("stream", True) is False:
             payload = {**payload, "stream": True}
-        self.last_inputs = {
+        last_inputs = {
             "url": invoke_url,
             "headers": self.headers["stream"],
             "json": self.payload_fn(payload),
             "stream": True,
         }
-        response = self.get_session_fn().post(**self.last_inputs)
+        self.last_inputs = ClientTape.record("request", last_inputs, safe=True)
+        session = self.get_session_fn()
+        response = session.post(**last_inputs)
+        self.last_response = ClientTape.record("response", response)
         self._try_raise(response)
         call = self.copy()
 
@@ -466,10 +500,8 @@ class BaseClient(BaseModel, ABC):
             for line in response.iter_lines():
                 if line and line.strip() != b"data: [DONE]":
                     line = line.decode("utf-8")
-                    msg, final_line = call.postprocess(line, stop=stop)
+                    msg = call.postprocess(line)
                     yield msg
-                    if final_line:
-                        break
                 self._try_raise(response)
 
         return (r for r in out_gen())
@@ -482,27 +514,25 @@ class BaseClient(BaseModel, ABC):
         model: Optional[str] = None,
         payload: dict = {},
         invoke_url: Optional[str] = None,
-        stop: Optional[Sequence[str]] = None,
         endpoint: str = "infer",
     ) -> AsyncIterator:
         invoke_url = self._get_invoke_url(model, invoke_url, endpoint=endpoint)
         if payload.get("stream", True) is False:
             payload = {**payload, "stream": True}
-        self.last_inputs = {
+        last_inputs = {
             "url": invoke_url,
             "headers": self.headers["stream"],
             "json": self.payload_fn(payload),
         }
+        self.last_inputs = ClientTape.record("request", last_inputs, safe=True)
         async with self.get_asession_fn() as session:
-            async with session.post(**self.last_inputs) as response:
+            async with session.post(**last_inputs) as response:
                 self._try_raise(response)
                 async for line in response.content.iter_any():
                     if line and line.strip() != b"data: [DONE]":
                         line = line.decode("utf-8")
-                        msg, final_line = self.postprocess(line, stop=stop)
+                        msg = self.postprocess(line)
                         yield msg
-                        if final_line:
-                            break
 
 
 
@@ -707,8 +737,8 @@ class BaseNVIDIA(BaseModel):
     @classmethod
     def get_available_models(
         cls,
-        client: Any = None,
         mode: Optional[_MODE_TYPE] = None,
+        client: Any = None,
         list_all: bool = False,
         list_none: bool = None,
         list_meta: bool = False,
@@ -732,7 +762,7 @@ class BaseNVIDIA(BaseModel):
             key=lambda x: f"{x.metadata.client_args.get('client') or 'Z'}{x.id}{cls}",
         )
         if not filter:
-            filter = [cls.__name__]
+            filter = [{"client": cls.__name__}]
         elif isinstance(filter, str):
             filter = [filter]
         elif isinstance(filter, dict):
@@ -741,25 +771,24 @@ class BaseNVIDIA(BaseModel):
             out = [
                 m for m in out 
                 if (list_none and m.model_type is None)
-                or all(str(f) in str(m) or f in [
-                    *m.metadata.client_args.items(),
-                    *m.metadata.infer_args.items(),
-                    *m.dict().items(),
-                ] for f in filter)
+                or all(
+                    (isinstance(f, str) and str(f) in str(m)) or
+                    (isinstance(f, dict) and any(
+                        (key in f and f.get(key) == value) or
+                        (isinstance(value, list) and f.get(key) in value)
+                        for key, value in [
+                            *m.metadata.client_args.items(),
+                            *m.metadata.infer_args.items(),
+                            *m.dict().items(),
+                        ]
+                    ))
+                    for f in filter
+                )
             ]
         if not list_meta:
             for model in out:
                 del model.metadata
         return out
-
-    # def get_model_details(self, model: Optional[str] = None) -> dict:
-    #     """Get more meta-details about a model retrieved by a given name"""
-    #     if model is None:
-    #         model = self.model
-    #     model_key = self.client._get_invoke_url(model).split("/")[-1]
-    #     known_fns = self.client.available_functions
-    #     fn_spec = [f for f in known_fns if f.get("id") == model_key][0]
-    #     return fn_spec
 
     def default_kwargs(self, type: str) -> dict:
         ## TODO: Type filtering sliminates some true positives. Bypassing with list_all
@@ -811,7 +840,7 @@ class BaseNVIDIA(BaseModel):
         nvcf_base = "https://api.nvcf.nvidia.com/v2/nvcf"  ## NVCF Main URL
 
         if mode == "nvcf":
-            ## Classic support for nvcf-backed foundation model endpoints.
+            ## Classic support for nvcf-backed foundation+ model endpoints.
             mspecs = model_specs or specs.NVCF_SPECS
             out.client = NVCFClient(base_url=nvcf_base, model_specs=mspecs)
 
