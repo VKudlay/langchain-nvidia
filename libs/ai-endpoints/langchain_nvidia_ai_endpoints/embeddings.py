@@ -1,27 +1,57 @@
 """Embeddings Components Derived from NVEModel/Embeddings"""
 
+import warnings
 from typing import Any, List, Literal, Optional
 
 from langchain_core.embeddings import Embeddings
 from langchain_core.outputs.llm_result import LLMResult
-from langchain_core.pydantic_v1 import BaseModel, Field, validator
+from langchain_core.pydantic_v1 import Field, validator
 
-from langchain_nvidia_ai_endpoints._common import NVIDIABase
+from langchain_nvidia_ai_endpoints._common import BaseNVIDIA
 from langchain_nvidia_ai_endpoints.callbacks import usage_callback_var
 
+from ._statics import MODEL_SPECS
 
-class NVIDIAEmbeddings(NVIDIABase, BaseModel, Embeddings):
-    """NVIDIA's AI Foundation Retriever Question-Answering Asymmetric Model."""
 
-    _default_model: str = "ai-embed-qa-4"
+class NVIDIAEmbeddings(BaseNVIDIA, Embeddings):
+    """
+    Client to NVIDIA embeddings models.
+
+    Fields:
+    - model: str, the name of the model to use
+    - truncate: "NONE", "START", "END", truncate input text if it exceeds the model's
+        maximum token length. Default is "NONE", which raises an error if an input is
+        too long.
+    """
+
+    _default_model: str = "nvidia/embed-qa-4"
     _default_max_batch_size: int = 50
-    infer_endpoint: str = Field("{base_url}/embeddings")
     model: str = Field(_default_model, description="Name of the model to invoke")
+    truncate: Literal["NONE", "START", "END"] = Field(
+        default="NONE",
+        description=(
+            "Truncate input text if it exceeds the model's maximum token length. "
+            "Default is 'NONE', which raises an error if an input is too long."
+        ),
+    )
     max_length: int = Field(2048, ge=1, le=2048)
     max_batch_size: int = Field(default=_default_max_batch_size)
     model_type: Optional[Literal["passage", "query"]] = Field(
         None, description="The type of text to be embedded."
     )
+
+    # indicate to user that max_length is deprecated when passed as an argument to
+    # NVIDIAEmbeddings' constructor, e.g. NVIDIAEmbeddings(max_length=...). this
+    # does not warning on assignment, e.g. embedder.max_length = ...
+    # todo: fix _NVIDIAClient.validate_client and enable Config.validate_assignment
+    @validator("max_length")
+    def deprecated_max_length(cls, value: int) -> int:
+        """Deprecate the max_length field."""
+        warnings.warn(
+            "The max_length field is deprecated. Use the 'truncate' instead.",
+            DeprecationWarning,
+        )
+        return value
 
     # todo: fix _NVIDIAClient.validate_client and enable Config.validate_assignment
     @validator("model")
@@ -29,13 +59,13 @@ class NVIDIAEmbeddings(NVIDIABase, BaseModel, Embeddings):
         """Deprecate the nvolveqa_40k model."""
         if value == "nvolveqa_40k" or value == "playground_nvolveqa_40k":
             warnings.warn(
-                "nvolveqa_40k is deprecated. Use ai-embed-qa-4 instead.",
+                "nvolveqa_40k is deprecated. Use 'nvidia/embed-qa-4' instead.",
                 DeprecationWarning,
             )
         return value
 
     def _embed(
-        self, texts: List[str], model_type: Literal["passage", "query"]
+        self, texts: List[str], model_type: Literal["passage", "query"], **kwargs: Any
     ) -> List[List[float]]:
         """Embed a single text entry to either passage or query type"""
         # AI Foundation Model API -
@@ -47,29 +77,31 @@ class NVIDIAEmbeddings(NVIDIABase, BaseModel, Embeddings):
         #  model: str                          -- model name, e.g. NV-Embed-QA
         #  encoding_format: "float" | "base64"
         #  input_type: "query" | "passage"
-        #  what about truncation?
-        payload = {
+        #  user: str                           -- ignored
+        #  truncate: "NONE" | "START" | "END"  -- default "NONE", error raised if
+        #                                         an input is too long
+        attr_kwargs = {
             "input": texts,
             "encoding_format": "float",
-            **self.client.default_kwargs(self.__class__.__name__),
-        }
-        matches = [m for m in self.get_available_models() if m.id == self.model]
-        type_key = "model" if (matches and matches[0].api_type == "aifm") else "input_type"
-        payload[type_key] = model_type
-        
-        response = self.client.get_req(
-            model_name=self.model,
-            payload=payload,
-            endpoint="infer",
-        )
-        response.raise_for_status()
-        result = response.json()
+            "truncate": self.truncate
+        }        
+        default_kwargs = self.default_kwargs(self.__class__.__name__)
+        attr_kwargs = {k: v for k, v in attr_kwargs.items() if v is not None}
+        payload = {**default_kwargs, **attr_kwargs, **kwargs}
+        ## TODO: Remove aifm edge case
+        if MODEL_SPECS.get(self.model, {}).get("api_type", None) == "aifm":
+            payload["model"] = model_type
+            payload.pop("truncate", "")
+        else: 
+            payload["input_type"] = model_type
+        result = self.client.get_req_generation(self.model, payload=payload)
         data = result.get("data", result)
         if not isinstance(data, list):
             raise ValueError(f"Expected data with a list of embeddings. Got: {data}")
-        embedding_list = [(res["embedding"], res["index"]) for res in data]
+        embedding_list = [(res.get("embedding"), res.get("index")) for res in data]
         self._invoke_callback_vars(result)
-        return [x[0] for x in sorted(embedding_list, key=lambda x: x[1])]
+        vectors = [x[0] for x in sorted(embedding_list, key=lambda x: x[1])]
+        return vectors
 
     def embed_query(self, text: str) -> List[float]:
         """Input pathway for query embeddings."""

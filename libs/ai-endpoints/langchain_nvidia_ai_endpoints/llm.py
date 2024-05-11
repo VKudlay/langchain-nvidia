@@ -19,7 +19,7 @@ from langchain_core.language_models import LLM
 from langchain_core.outputs import GenerationChunk
 from langchain_core.pydantic_v1 import Field
 
-from langchain_nvidia_ai_endpoints._common import NVIDIABase
+from langchain_nvidia_ai_endpoints._common import BaseNVIDIA
 
 _CallbackManager = Union[AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun]
 
@@ -65,7 +65,7 @@ for txt in starcoder.stream("Here is my implementation of fizzbuzz:\n```python\n
 """
 
 
-class NVIDIA(NVIDIABase, LLM):
+class NVIDIA(BaseNVIDIA, LLM):
     """NVIDIA chat model.
 
     Example:
@@ -100,26 +100,24 @@ class NVIDIA(NVIDIABase, LLM):
     def _call(
         self,
         prompt: str,
-        stop: Optional[List[str]] = None,
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> str:
         """Invoke on a single list of chat messages."""
-        response = self.get_generation(prompt=prompt, stop=stop, **kwargs)
-        output = self.custom_postprocess(response)
+        response = self.get_generation(prompt=prompt, **kwargs)
+        output = self.postprocess(response)
         return output
 
     def _stream(
         self,
         prompt: str,
-        stop: Optional[List[str]] = None,
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> Iterator[GenerationChunk]:
         """Allows streaming to model!"""
-        for response in self.get_stream(prompt=prompt, stop=stop, **kwargs):
+        for response in self.get_stream(prompt=prompt, **kwargs):
             self._set_callback_out(response, run_manager)
-            chunk = GenerationChunk(text=self.custom_postprocess(response))
+            chunk = self.postprocess(response, return_chunk=True)
             yield chunk
             if run_manager:
                 run_manager.on_llm_new_token(chunk.text, chunk=chunk)
@@ -127,13 +125,12 @@ class NVIDIA(NVIDIABase, LLM):
     async def _astream(
         self,
         prompt: str,
-        stop: Optional[List[str]] = None,
         run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> AsyncIterator[GenerationChunk]:
-        async for response in self.get_astream(prompt=prompt, stop=stop, **kwargs):
+        async for response in self.get_astream(prompt=prompt, **kwargs):
             self._set_callback_out(response, run_manager)
-            chunk = GenerationChunk(text=self.custom_postprocess(response))
+            chunk = self.postprocess(response, return_chunk=True)
             yield chunk
             if run_manager:
                 await run_manager.on_llm_new_token(chunk.text, chunk=chunk)
@@ -149,12 +146,13 @@ class NVIDIA(NVIDIABase, LLM):
                 if hasattr(cb, "llm_output"):
                     cb.llm_output = result
 
-    def custom_postprocess(self, msg: dict) -> str:
-        if "content" in msg:
-            return msg["content"]
-        elif "b64_json" in msg:
-            return msg["b64_json"]
-        return str(msg)
+    def postprocess(self, msg: dict, return_chunk=False) -> str:
+        generation = (
+            msg.get("cumulative") 
+            or msg.get("choices") 
+            or [{}]
+        )[0].get("content", "")
+        return GenerationChunk(text=generation) if return_chunk else generation
 
     ######################################################################################
     ## Core client-side interfaces
@@ -165,9 +163,8 @@ class NVIDIA(NVIDIABase, LLM):
         **kwargs: Any,
     ) -> dict:
         """Call to client generate method with call scope"""
-        stop = kwargs["stop"] = kwargs.get("stop") or self.stop
         payload = self.get_payload(prompt=prompt, stream=False, **kwargs)
-        out = self.client.get_req_generation(self.model, stop=stop, payload=payload)
+        out = self.client.get_req_generation(self.model, payload=payload)
         return out
 
     def get_stream(
@@ -176,9 +173,8 @@ class NVIDIA(NVIDIABase, LLM):
         **kwargs: Any,
     ) -> Iterator:
         """Call to client stream method with call scope"""
-        stop = kwargs["stop"] = kwargs.get("stop") or self.stop
         payload = self.get_payload(prompt=prompt, stream=True, **kwargs)
-        return self.client.get_req_stream(self.model, stop=stop, payload=payload)
+        return self.client.get_req_stream(self.model, payload=payload)
 
     def get_astream(
         self,
@@ -186,9 +182,8 @@ class NVIDIA(NVIDIABase, LLM):
         **kwargs: Any,
     ) -> AsyncIterator:
         """Call to client astream methods with call scope"""
-        stop = kwargs["stop"] = kwargs.get("stop") or self.stop
         payload = self.get_payload(prompt=prompt, stream=True, **kwargs)
-        return self.client.get_req_astream(self.model, stop=stop, payload=payload)
+        return self.client.get_req_astream(self.model, payload=payload)
 
     def get_payload(self, prompt: str, **kwargs: Any) -> dict:
         """Generates payload for the _NVIDIAClient API to send to service."""
@@ -200,8 +195,8 @@ class NVIDIA(NVIDIABase, LLM):
             "bad": self.bad,
             "stop": self.stop,
             "labels": self.labels,
-        }
-        default_kwargs = self.client.default_kwargs(self.__class__.__name__)
+        }            
+        default_kwargs = self.default_kwargs({"client": self.__class__.__name__})
         attr_kwargs = {k: v for k, v in attr_kwargs.items() if v is not None}
         new_kwargs = {**default_kwargs, **attr_kwargs, **kwargs}
         return self.prep_payload(prompt=prompt, **new_kwargs)
@@ -209,5 +204,8 @@ class NVIDIA(NVIDIABase, LLM):
     def prep_payload(self, prompt: str, **kwargs: Any) -> dict:
         """Prepares a message or list of messages for the payload"""
         if kwargs.get("stop") is None:
-            kwargs.pop("stop")
+            if self.stop:
+                kwargs["stop"] = self.stop
+            else:
+                kwargs.pop("stop")
         return {"prompt": prompt, **kwargs}
