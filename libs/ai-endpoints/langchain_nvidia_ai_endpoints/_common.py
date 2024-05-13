@@ -584,7 +584,7 @@ class OpenClient(BaseClient):
     NOTE: Models in the playground does not currently support raw text continuation.
     """
     ## Core defaults. These probably should not be changed
-    base_url: str = Field("https://api.openai.com/v1")
+    base_url: str = Field("https://integrate.api.nvidia.com/v1")
     get_session_fn: Callable = Field(requests.Session)
     get_asession_fn: Callable = Field(aiohttp.ClientSession)
     endpoints: dict = Field(
@@ -607,6 +607,11 @@ class OpenClient(BaseClient):
                 f"Unexpected response when querying {invoke_url}\n{query_res}"
             )
         out = {v.get("id"): {**v, **self.model_specs.get(v.get("id"), {})} for v in model_list}
+        ## TODO: Adjust scope/power of NVIDIA_BASE_URL
+        if os.environ.get("NVIDIA_BASE_URL", "") == self.base_url:
+            for v in out.values():
+                if v.get("base_url"):
+                    v["base_url"] = self.base_url
         return out
 
 
@@ -620,7 +625,7 @@ class StaticClient(BaseClient):
     NOTE: Models in the playground does not currently support raw text continuation.
     """
     ## Core defaults. These probably should not be changed
-    base_url: str = Field("https://api.openai.com/v1")
+    base_url: str = Field("https://integrate.api.nvidia.com/v1")
     get_session_fn: Callable = Field(requests.Session)
     get_asession_fn: Callable = Field(aiohttp.ClientSession)
     endpoints: dict = Field(
@@ -662,7 +667,7 @@ class BaseNVIDIA(BaseModel):
         values["curr_mode"] = (
             values.pop("mode", None) 
             or values.get("curr_mode")
-            # or os.environ.get("NVIDIA_DEFAULT_MODE") ## TODO: Commented for convenience in testing
+            or os.environ.get("NVIDIA_DEFAULT_MODE")
             or default_mode
         )
         ## TODO: This try-override fails when NVIDIA_DEFAULT_MODE is defined. 
@@ -678,7 +683,10 @@ class BaseNVIDIA(BaseModel):
             values["curr_mode"] = cls._default_mode
         if not values.get("client"):
             dummy_self = cls(client=StaticClient())
-            mode_kw = {"mode": values["curr_mode"]}
+            mode_kw = {
+                "mode": values["curr_mode"],
+                "base_url": values.pop("base_url", os.environ.get("NVIDIA_BASE_URL")),
+            }
             values["client"] = dummy_self.mode(**values, **mode_kw).client
             
         # the only model that doesn't support a stream parameter is kosmos_2.
@@ -770,7 +778,7 @@ class BaseNVIDIA(BaseModel):
         if not list_all:
             out = [
                 m for m in out 
-                if (list_none and m.model_type is None)
+                if (list_none is True and m.model_type is None)
                 or all(
                     (isinstance(f, str) and str(f) in str(m)) or
                     (isinstance(f, dict) and any(

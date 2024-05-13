@@ -27,17 +27,16 @@ class NVIDIAEmbeddings(BaseNVIDIA, Embeddings):
     _default_model: str = "nvidia/embed-qa-4"
     _default_max_batch_size: int = 50
     model: str = Field(_default_model, description="Name of the model to invoke")
-    truncate: Literal["NONE", "START", "END"] = Field(
-        default="NONE",
+    truncate: Optional[Literal["NONE", "START", "END"]] = Field(
         description=(
-            "Truncate input text if it exceeds the model's maximum token length. "
-            "Default is 'NONE', which raises an error if an input is too long."
+            "Truncate input text from START or END if max token length is exceeded."
+            " If 'NONE', exceeding inputs will trigger exception. Unset by default."
         ),
     )
-    max_length: int = Field(2048, ge=1, le=2048)
+    max_length: int = Field(2048, ge=1)
     max_batch_size: int = Field(default=_default_max_batch_size)
     model_type: Optional[Literal["passage", "query"]] = Field(
-        None, description="The type of text to be embedded."
+        description="The type of text to be embedded."
     )
 
     # indicate to user that max_length is deprecated when passed as an argument to
@@ -83,8 +82,9 @@ class NVIDIAEmbeddings(BaseNVIDIA, Embeddings):
         attr_kwargs = {
             "input": texts,
             "encoding_format": "float",
-            "truncate": self.truncate
-        }        
+        }
+        if self.truncate:
+            attr_kwargs["truncate"] = self.truncate
         default_kwargs = self.default_kwargs(self.__class__.__name__)
         attr_kwargs = {k: v for k, v in attr_kwargs.items() if v is not None}
         payload = {**default_kwargs, **attr_kwargs, **kwargs}
