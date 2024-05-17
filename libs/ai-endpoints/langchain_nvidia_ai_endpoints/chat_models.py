@@ -132,6 +132,7 @@ class ChatNVIDIA(BaseNVIDIA, BaseChatModel):
     """
 
     _default_model: str = "mistralai/mixtral-8x7b-instruct-v0.1"
+    infer_path: Optional[str] = Field("{base_url}/chat/completions")
     model: str = Field(_default_model, description="Name of the model to invoke")
     temperature: Optional[float] = Field(description="Sampling temperature in [0, 1]")
     max_tokens: Optional[int] = Field(description="Maximum # of tokens to generate")

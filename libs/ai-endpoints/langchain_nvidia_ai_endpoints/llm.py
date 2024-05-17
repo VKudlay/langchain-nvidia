@@ -79,7 +79,7 @@ class NVIDIA(BaseNVIDIA, LLM):
     """
 
     _default_model: str = "starcoder2_15b"
-    infer_endpoint: str = Field("{base_url}/completions")
+    infer_path: Optional[str] = Field("{base_url}/completions")
     model: str = Field(_default_model, description="Name of the model to invoke")
     temperature: Optional[float] = Field(description="Sampling temperature in [0, 1]")
     max_tokens: Optional[int] = Field(description="Maximum # of tokens to generate")

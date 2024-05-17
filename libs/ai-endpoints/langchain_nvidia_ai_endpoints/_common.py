@@ -650,6 +650,7 @@ class BaseNVIDIA(BaseModel):
 
     _default_model: str = ""
     _default_mode: str = "nvidia"
+    infer_path: Optional[str] = Field()
     model: str = Field(description="Name of the model to invoke")
     curr_mode: _MODE_TYPE = Field(_default_mode)
 
@@ -702,6 +703,12 @@ class BaseNVIDIA(BaseModel):
 
             values["client"].payload_fn = kosmos_patch
         
+        return values
+    
+    @root_validator(pre=False)
+    def validate_client_post(cls, values: Any) -> Any:
+        if "infer_path" in values:
+            values["client"].endpoints["infer"] = values["infer_path"]
         return values
     
     @classmethod

@@ -26,6 +26,7 @@ class NVIDIAEmbeddings(BaseNVIDIA, Embeddings):
 
     _default_model: str = "nvidia/embed-qa-4"
     _default_max_batch_size: int = 50
+    infer_path: Optional[str] = Field("{base_url}/embeddings")
     model: str = Field(_default_model, description="Name of the model to invoke")
     truncate: Optional[Literal["NONE", "START", "END"]] = Field(
         description=(
