@@ -185,6 +185,12 @@ CATALOG_SPECS = {
     ## TODO: Very temporary behavior. Expect it to change
     'mistralai/mixtral-8x22b-v0.1': {'model_type': 'completion', 'max_tokens': 2048, 'infer_path': '{base_url}/chat/completions'},
     'mistralai/mixtral-8x7b-instruct-v0.1': {'model_type': 'chat', 'max_tokens': 2048},
+    'microsoft/phi-3-medium-4k-instruct': {'model_type': 'chat', 'max_tokens': 1024},
+    'microsoft/phi-3-small-128k-instruct': {'model_type': 'chat', 'max_tokens': 1024},
+    'microsoft/phi-3-small-8k-instruct': {'model_type': 'chat', 'max_tokens': 1024},
+    Model(id='microsoft/phi-3-medium-4k-instruct', model_type=None),
+ Model(id='microsoft/phi-3-small-128k-instruct', model_type=None),
+ Model(id='microsoft/phi-3-small-8k-instruct', model_type=None),
     'seallms/seallm-7b-v2.5': {'model_type': 'chat', 'max_tokens': 2048},
     'snowflake/arctic': {'model_type': 'chat', 'max_tokens': 2048},
     'nvidia/embed-qa-4': {
